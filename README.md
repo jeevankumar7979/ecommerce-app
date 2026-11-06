@@ -71,7 +71,7 @@ This runs `clean test bootJar` independently for all seven Gradle applications. 
 gradle --no-daemon -p order-service test bootJar
 ```
 
-Jenkins is the CI/CD pipeline: it polls its configured SCM every five minutes, builds/tests all services, and publishes images and deploys only from the `main` branch. Configure Jenkins as a Pipeline-from-SCM job pointing at this repository and its `main` branch; multibranch jobs instead need branch indexing/webhook triggers configured in Jenkins. Jenkins agents need Java 21, Gradle 9.8.2, Docker CLI access to a daemon, `kubectl`, the `ghcr-credentials` username/password credential, the `ecommerce-kubeconfig` file credential, and a pre-provisioned cluster/runtime as described under Kubernetes.
+Jenkins is the CI/CD pipeline. It polls its configured SCM every five minutes and uses the commit changelog to build, test, publish, and roll out only the changed service on `main`. Changes to shared Gradle/build files rebuild all services; changes under `config/` refresh the ConfigMap and restart the deployed services; changes to `k8s/platform.yaml` rebuild and roll out all deployed services. `discovery-server` is built and published when it changes but is not deployed to Kubernetes. Configure Jenkins as a Pipeline-from-SCM job pointing at this repository and its `main` branch; for a Multibranch Pipeline, configure branch indexing or a GitHub webhook in Jenkins. Jenkins agents need Java 21, Gradle 9.8.2, Docker CLI access to a daemon, `kubectl`, the `ghcr-credentials` username/password credential, the `ecommerce-kubeconfig` file credential, and a pre-provisioned cluster/runtime as described under Kubernetes.
 
 ## Run locally with Docker Compose
 
