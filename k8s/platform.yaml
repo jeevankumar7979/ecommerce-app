@@ -1,0 +1,445 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ecommerce
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: service-config
+  namespace: ecommerce
+data:
+  application.yml: |
+    spring:
+      kafka:
+        template:
+          observations-enabled: true
+        listener:
+          observation-enabled: true
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info,prometheus,gateway
+      endpoint:
+        gateway:
+          access: read-only
+        health:
+          probes:
+            enabled: true
+      tracing:
+        sampling:
+          probability: 0.1
+      metrics:
+        tags:
+          application: ${spring.application.name}
+      otlp:
+        tracing:
+          endpoint: http://otel-collector:4318/v1/traces
+  api-gateway.yml: |
+    spring:
+      cloud:
+        gateway:
+          routes:
+            - id: orders
+              uri: ${ORDER_SERVICE_URI:http://order-service:8081}
+              predicates:
+                - Path=/api/orders/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 10
+                    redis-rate-limiter.burstCapacity: 20
+                    key-resolver: "#{@clientKeyResolver}"
+                - name: CircuitBreaker
+                  args:
+                    name: orders
+                    fallbackUri: forward:/fallback
+            - id: inventory
+              uri: ${INVENTORY_SERVICE_URI:http://inventory-service:8082}
+              predicates:
+                - Path=/api/inventory/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 10
+                    redis-rate-limiter.burstCapacity: 20
+                    key-resolver: "#{@clientKeyResolver}"
+                - name: CircuitBreaker
+                  args:
+                    name: inventory
+                    fallbackUri: forward:/fallback
+  order-service.yml: |
+    inventory:
+      base-url: ${INVENTORY_SERVICE_URL:http://inventory-service:8082}
+      connect-timeout: 2s
+      read-timeout: 3s
+  inventory-service.yml: |
+    spring:
+      jpa:
+        open-in-view: false
+  payment-service.yml: |
+    payment:
+      outbox:
+        delay-ms: 1000
+  notification-service.yml: |
+    spring:
+      kafka:
+        listener:
+          ack-mode: record
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ecommerce-service
+  namespace: ecommerce
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: config-server
+  namespace: ecommerce
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: config-server}
+  template:
+    metadata:
+      labels: {app: config-server}
+    spec:
+      serviceAccountName: ecommerce-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: app
+          image: ghcr.io/jeevankumar7979/ecommerce-app/config-server:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8888}]
+          env:
+            - {name: CONFIG_SEARCH_LOCATIONS, value: "file:/config"}
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: http}, initialDelaySeconds: 10, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /actuator/health/liveness, port: http}, initialDelaySeconds: 30, periodSeconds: 20}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+      volumes:
+        - name: config
+          configMap: {name: service-config}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: config-server
+  namespace: ecommerce
+spec:
+  selector: {app: config-server}
+  ports: [{name: http, port: 8888, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: ecommerce
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: api-gateway}
+  template:
+    metadata:
+      labels: {app: api-gateway}
+    spec:
+      serviceAccountName: ecommerce-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: app
+          image: ghcr.io/jeevankumar7979/ecommerce-app/api-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - {name: CONFIG_SERVER_URI, value: "http://config-server:8888"}
+            - {name: EUREKA_CLIENT_ENABLED, value: "false"}
+            - {name: ORDER_SERVICE_URI, value: "http://order-service:8081"}
+            - {name: INVENTORY_SERVICE_URI, value: "http://inventory-service:8082"}
+            - {name: REDIS_HOST, value: redis}
+            - {name: JWT_ISSUER_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-issuer-uri}}}
+            - {name: JWT_JWK_SET_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-jwk-set-uri}}}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: http}, initialDelaySeconds: 25, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /actuator/health/liveness, port: http}, initialDelaySeconds: 60, periodSeconds: 20}
+          resources:
+            requests: {cpu: 200m, memory: 384Mi}
+            limits: {cpu: "2", memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+            runAsNonRoot: true
+            runAsUser: 10001
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+      # Attach a registry pull secret here if your GHCR packages are private.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: ecommerce
+spec:
+  selector: {app: api-gateway}
+  ports: [{name: http, port: 8080, targetPort: http}]
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: ecommerce
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: order-service}
+  template:
+    metadata:
+      labels: {app: order-service}
+    spec:
+      serviceAccountName: ecommerce-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: app
+          image: ghcr.io/jeevankumar7979/ecommerce-app/order-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8081}]
+          env:
+            - {name: CONFIG_SERVER_URI, value: "http://config-server:8888"}
+            - {name: EUREKA_CLIENT_ENABLED, value: "false"}
+            - {name: MONGODB_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: mongodb-uri}}}
+            - {name: INVENTORY_SERVICE_URL, value: "http://inventory-service:8082"}
+            - {name: KAFKA_BOOTSTRAP_SERVERS, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: kafka-bootstrap-servers}}}
+            - {name: JWT_TOKEN_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-token-uri}}}
+            - {name: SERVICE_CLIENT_ID, value: ecommerce-service}
+            - {name: SERVICE_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: service-client-secret}}}
+            - {name: JWT_ISSUER_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-issuer-uri}}}
+            - {name: JWT_JWK_SET_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-jwk-set-uri}}}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: http}, initialDelaySeconds: 30, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /actuator/health/liveness, port: http}, initialDelaySeconds: 60, periodSeconds: 20}
+          resources:
+            requests: {cpu: 200m, memory: 384Mi}
+            limits: {cpu: "2", memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+      # Attach a registry pull secret here if your GHCR packages are private.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: ecommerce
+spec:
+  selector: {app: order-service}
+  ports: [{name: http, port: 8081, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service
+  namespace: ecommerce
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: inventory-service}
+  template:
+    metadata:
+      labels: {app: inventory-service}
+    spec:
+      serviceAccountName: ecommerce-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: app
+          image: ghcr.io/jeevankumar7979/ecommerce-app/inventory-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8082}]
+          env:
+            - {name: CONFIG_SERVER_URI, value: "http://config-server:8888"}
+            - {name: EUREKA_CLIENT_ENABLED, value: "false"}
+            - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: inventory-db-url}}}
+            - {name: DATABASE_USERNAME, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: inventory-db-username}}}
+            - {name: DATABASE_PASSWORD, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: inventory-db-password}}}
+            - {name: JWT_ISSUER_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-issuer-uri}}}
+            - {name: JWT_JWK_SET_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-jwk-set-uri}}}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: http}, initialDelaySeconds: 35, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /actuator/health/liveness, port: http}, initialDelaySeconds: 60, periodSeconds: 20}
+          resources:
+            requests: {cpu: 200m, memory: 384Mi}
+            limits: {cpu: "2", memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-service
+  namespace: ecommerce
+spec:
+  selector: {app: inventory-service}
+  ports: [{name: http, port: 8082, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: ecommerce
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: payment-service}
+  template:
+    metadata:
+      labels: {app: payment-service}
+    spec:
+      serviceAccountName: ecommerce-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: app
+          image: ghcr.io/jeevankumar7979/ecommerce-app/payment-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8083}]
+          env:
+            - {name: CONFIG_SERVER_URI, value: "http://config-server:8888"}
+            - {name: EUREKA_CLIENT_ENABLED, value: "false"}
+            - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: payment-db-url}}}
+            - {name: DATABASE_USERNAME, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: payment-db-username}}}
+            - {name: DATABASE_PASSWORD, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: payment-db-password}}}
+            - {name: KAFKA_BOOTSTRAP_SERVERS, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: kafka-bootstrap-servers}}}
+            - {name: JWT_ISSUER_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-issuer-uri}}}
+            - {name: JWT_JWK_SET_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-jwk-set-uri}}}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: http}, initialDelaySeconds: 35, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /actuator/health/liveness, port: http}, initialDelaySeconds: 60, periodSeconds: 20}
+          resources:
+            requests: {cpu: 200m, memory: 384Mi}
+            limits: {cpu: "2", memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: ecommerce
+spec:
+  selector: {app: payment-service}
+  ports: [{name: http, port: 8083, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: ecommerce
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: notification-service}
+  template:
+    metadata:
+      labels: {app: notification-service}
+    spec:
+      serviceAccountName: ecommerce-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: app
+          image: ghcr.io/jeevankumar7979/ecommerce-app/notification-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8084}]
+          env:
+            - {name: CONFIG_SERVER_URI, value: "http://config-server:8888"}
+            - {name: EUREKA_CLIENT_ENABLED, value: "false"}
+            - {name: KAFKA_BOOTSTRAP_SERVERS, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: kafka-bootstrap-servers}}}
+            - {name: JWT_ISSUER_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-issuer-uri}}}
+            - {name: JWT_JWK_SET_URI, valueFrom: {secretKeyRef: {name: ecommerce-runtime, key: jwt-jwk-set-uri}}}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: http}, initialDelaySeconds: 30, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /actuator/health/liveness, port: http}, initialDelaySeconds: 60, periodSeconds: 20}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: ecommerce
+spec:
+  selector: {app: notification-service}
+  ports: [{name: http, port: 8084, targetPort: http}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: ecommerce
+spec:
+  selector: {app: redis}
+  ports: [{port: 6379, targetPort: 6379}]

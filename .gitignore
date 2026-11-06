@@ -1,0 +1,13 @@
+.gradle/
+**/build/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+.env
+.env.*
+!.env.example
+k8s/runtime-secrets.env
+*.zip
+build/
+reports/

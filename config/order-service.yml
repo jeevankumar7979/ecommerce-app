@@ -1,0 +1,8 @@
+inventory:
+  base-url: ${INVENTORY_SERVICE_URL:http://inventory-service:8082}
+  connect-timeout: 2s
+  read-timeout: 3s
+spring:
+  kafka:
+    listener:
+      ack-mode: record

@@ -1,0 +1,3 @@
+payment:
+  outbox:
+    delay-ms: 1000

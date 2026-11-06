@@ -1,0 +1,35 @@
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: orders
+          uri: ${ORDER_SERVICE_URI:lb://order-service}
+          predicates:
+            - Path=/api/orders/**
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${GATEWAY_RATE_REPLENISH:10}
+                redis-rate-limiter.burstCapacity: ${GATEWAY_RATE_BURST:20}
+                key-resolver: "#{@clientKeyResolver}"
+            - name: CircuitBreaker
+              args:
+                name: orders
+                fallbackUri: forward:/fallback
+        - id: inventory
+          uri: ${INVENTORY_SERVICE_URI:lb://inventory-service}
+          predicates:
+            - Path=/api/inventory/**
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${GATEWAY_RATE_REPLENISH:10}
+                redis-rate-limiter.burstCapacity: ${GATEWAY_RATE_BURST:20}
+                key-resolver: "#{@clientKeyResolver}"
+            - name: CircuitBreaker
+              args:
+                name: inventory
+                fallbackUri: forward:/fallback
+      httpclient:
+        connect-timeout: 2000
+        response-timeout: 5s

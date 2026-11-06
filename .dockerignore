@@ -1,0 +1,12 @@
+.git
+.gradle
+**/build/classes
+**/build/resources
+**/build/tmp
+**/build/reports
+**/build/test-results
+**/build/generated
+.env
+.idea
+.vscode
+*.zip
