@@ -6,6 +6,10 @@ pipeline {
         disableConcurrentBuilds()
     }
 
+    triggers {
+        pollSCM('H/5 * * * *')
+    }
+
     environment {
         IMAGE_REGISTRY = 'ghcr.io/jeevankumar7979/ecommerce-app'
         KUBE_NAMESPACE = 'ecommerce'
