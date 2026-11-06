@@ -71,7 +71,7 @@ This runs `clean test bootJar` independently for all seven Gradle applications. 
 gradle --no-daemon -p order-service test bootJar
 ```
 
-The GitHub Actions workflow runs the same build on pushes and pull requests. The Jenkinsfile polls its configured SCM every five minutes, builds/tests all services, and publishes images and deploys only from the `main` branch. Configure Jenkins as a Pipeline-from-SCM job pointing at this repository and its `main` branch; multibranch jobs instead need branch indexing/webhook triggers configured in Jenkins. Jenkins agents need Java 21, Gradle 9.8.2, Docker CLI access to a daemon, `kubectl`, the `ghcr-credentials` username/password credential, the `ecommerce-kubeconfig` file credential, and a pre-provisioned cluster/runtime as described under Kubernetes.
+Jenkins is the CI/CD pipeline: it polls its configured SCM every five minutes, builds/tests all services, and publishes images and deploys only from the `main` branch. Configure Jenkins as a Pipeline-from-SCM job pointing at this repository and its `main` branch; multibranch jobs instead need branch indexing/webhook triggers configured in Jenkins. Jenkins agents need Java 21, Gradle 9.8.2, Docker CLI access to a daemon, `kubectl`, the `ghcr-credentials` username/password credential, the `ecommerce-kubeconfig` file credential, and a pre-provisioned cluster/runtime as described under Kubernetes.
 
 ## Run locally with Docker Compose
 
